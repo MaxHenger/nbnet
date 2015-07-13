@@ -40,8 +40,20 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 				//write all data
 				written, err := connection.Write(task)
 				if err != nil {
-					//error while writing, return this error to the routine
-					errors <- ErrorEmbedded{"connectionRoutine", "Error occurred while writing data", err}
+					//figure out what kind of error is received, as this might
+					//have an impact on how the user managing this routine has
+					//to response to the error
+					switch err := err.(type) {
+					case net.Error:
+						//net error, check if it is a timeout
+						if err.Timeout() {
+							errors <- ErrorEmbedded{ErrorTypeWriteTimeout, "connectionRoutine", "Net timeout error occurred while writing data", err}
+						} else {
+							errors <- ErrorEmbedded{ErrorTypeWrite, "connectionRoutine", "Net error occurred while writing data", err}
+						}
+					default:
+						errors <- ErrorEmbedded{ErrorTypeWrite, "connectionRoutine", "Generic error occurred while writing data", err}
+					}
 					break
 				}
 
@@ -73,6 +85,8 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 							//not a problem at all
 							if totalBytesRead != 0 {
 								//full package read, return the package
+								//TODO: Figure out when this is actually not an error
+								//and this is an error.
 								reading <- totalBuffer
 							} else {
 								//no data read and a timeout error, this is the
@@ -80,10 +94,10 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 								time.Sleep(sleepDuration)
 							}
 						} else {
-							errors <- ErrorEmbedded{"connectionRoutine", "A net non-timeout error ocurred while attempting to receive data", err}
+							errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A net non-timeout error occurred while receiving data", err}
 						}
 					default:
-						errors <- ErrorEmbedded{"connectionRoutine", "A non-net error ocurred while attempting to receive data", err}
+						errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A generic error ocurred while receiving data", err}
 					}
 					//whatever happened, this is the cue to stop reading
 					break
@@ -115,7 +129,25 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 //		~30 ms seems to be okay
 //	- sleep: If net.Conn.Read times out and no data is received (the connection
 //		is idle), this duration specifies how long the routine should sleep
-func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRead, deadlineWrite, sleep time.Duration, waitGroup *sync.WaitGroup) *Connection {
+func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRead, deadlineWrite, sleep time.Duration, waitGroup *sync.WaitGroup) (*Connection, error) {
+	//check the provided values for errors
+	if channelSize < 1 {
+		return nil, Error{ErrorTypeFatal, "newConnection", "Channel size is too small"}
+	}
+	
+	if bufferSize < 1 {
+		return nil, Error{ErrorTypeFatal, "newConnection", "Buffer size is too small"}
+	}
+	
+	if deadlineRead <= 0 {
+		return nil, Error{ErrorTypeFatal, "newConnection", "Reading deadline duration is too small"}
+	}
+	
+	if deadlineWrite <= 0 {
+		return nil, Error{ErrorTypeFatal, "newConnection", "Writing deadline duration is too small"}
+	}
+	
+	//Create new connection
 	newConnection := &Connection{connection, deadlineRead, deadlineWrite, sleep,
 		make(chan []byte, channelSize), make(chan []byte, channelSize), make(chan error, channelSize), make(chan int)}
 
@@ -123,7 +155,7 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 	go connectionRoutine(newConnection.connection, newConnection.reading, newConnection.writing,
 		newConnection.errors, newConnection.quit, deadlineRead, deadlineWrite, sleep, waitGroup, bufferSize)
 
-	return newConnection
+	return newConnection, nil
 }
 
 //Connection.Send(...) will push the data to-be-sent onto the channel that will
