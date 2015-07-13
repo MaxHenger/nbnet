@@ -80,11 +80,11 @@ func serverRoutine(connections chan net.Conn, errors chan error, quit chan int, 
 				//net errors are only important if it is
 				if !err.Timeout() {
 					//net error was not a timeout error, send it back to the server
-					errors <- ErrorEmbedded{"serverRoutine", "Received a non-timeout net error", err}
+					errors <- ErrorEmbedded{ErrorTypeWarning, "serverRoutine", "Received a non-timeout net error", err}
 				}
 			default:
 				//non-net error
-				errors <- ErrorEmbedded{"serverRoutine", "Received a non-net error", err}
+				errors <- ErrorEmbedded{ErrorTypeWarning, "serverRoutine", "Received a non-net error", err}
 			}
 		}
 
@@ -146,16 +146,16 @@ func NewServer(deadlineListen time.Duration, channelListen int,
 	deadlineRead, deadlineWrite, sleepDuration time.Duration, channelConn, bufferConn int) (*Server, error) {
 	//ensure input arguments are valid
 	if channelListen < 1 {
-		return nil, Error{"NewServer", "Channel size for listener-created new connections is too small"}
+		return nil, Error{ErrorTypeFatal, "NewServer", "Channel size for listener-created new connections is too small"}
 	}
 
 	if channelConn < 1 {
-		return nil, Error{"NewServer", "Channel size for connection-retrieved data is too small"}
+		return nil, Error{ErrorTypeFatal, "NewServer", "Channel size for connection-retrieved data is too small"}
 	}
 
 	if bufferConn < 1 {
 		//this value should really be larger anyway, but we're catching absolutely impossible values here
-		return nil, Error{"NewServer", "Buffer size for retrieve data from a connection is too small"}
+		return nil, Error{ErrorTypeFatal, "NewServer", "Buffer size for retrieve data from a connection is too small"}
 	}
 
 	return &Server{nil, make(chan error, channelListen), deadlineListen, make(chan net.Conn, channelListen), sync.WaitGroup{},
@@ -176,11 +176,11 @@ func NewServer(deadlineListen time.Duration, channelListen int,
 func (s *Server) Listen(protocol Protocol, ip *net.IP, port int) error {
 	//check input arguments for errors
 	if !isValidProtocol(protocol) {
-		return Error{"NewServer", "Invalid protocol specified"}
+		return Error{ErrorTypeFatal, "NewServer", "Invalid protocol specified"}
 	}
 
 	if port < 0 {
-		return Error{"NewServer", "Invalid listening port specified"}
+		return Error{ErrorTypeFatal, "NewServer", "Invalid listening port specified"}
 	}
 
 	//convert IP and port to string
@@ -199,7 +199,7 @@ func (s *Server) Listen(protocol Protocol, ip *net.IP, port int) error {
 		tcpAddress, err := net.ResolveTCPAddr(protocolMap[protocol], buffer.String())
 
 		if err != nil {
-			return ErrorEmbedded{"Server", "Failed to resolve TCP address", err}
+			return ErrorEmbedded{ErrorTypeFatal, "Server", "Failed to resolve TCP address", err}
 		}
 
 		//create new TCP port
@@ -207,7 +207,7 @@ func (s *Server) Listen(protocol Protocol, ip *net.IP, port int) error {
 
 		//check if the connection was handled correctly
 		if err != nil {
-			return ErrorEmbedded{"Server", "Failed to listen on a new TCP port", err}
+			return ErrorEmbedded{ErrorTypeFatal, "Server", "Failed to listen on a new TCP port", err}
 		}
 
 		//new TCP port
@@ -223,7 +223,7 @@ func (s *Server) Listen(protocol Protocol, ip *net.IP, port int) error {
 		unixAddress, err := net.ResolveUnixAddr(protocolMap[protocol], buffer.String())
 
 		if err != nil {
-			return ErrorEmbedded{"Server", "Failed to resolve unix address", err}
+			return ErrorEmbedded{ErrorTypeFatal, "Server", "Failed to resolve unix address", err}
 		}
 
 		//create new Unix port
@@ -231,7 +231,7 @@ func (s *Server) Listen(protocol Protocol, ip *net.IP, port int) error {
 
 		//check if the connection was created correctly
 		if err != nil {
-			return ErrorEmbedded{"Server", "Failed to listen on a new Unix port", err}
+			return ErrorEmbedded{ErrorTypeFatal, "Server", "Failed to listen on a new Unix port", err}
 		}
 
 		//new Unix port
@@ -262,8 +262,13 @@ func (s *Server) Update() (*Connection, bool, error) {
 		//new connection received, process it into a nbnet connection
 		s.waitGroupConnections.Add(1)
 
-		newConnection := newConnection(conn, s.channelSize, s.bufferSize, s.deadlineRead,
+		newConnection, err := newConnection(conn, s.channelSize, s.bufferSize, s.deadlineRead,
 			s.deadlineWrite, s.sleepDuration, &s.waitGroupConnections)
+			
+		if err != nil {
+			//Error occurred while creating the new nbnet connection
+			return nil, false, ErrorEmbedded{ErrorTypeFatal, "Client", "Unable to create a connection instance", err}
+		}
 
 		s.connections = append(s.connections, newConnection)
 

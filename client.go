@@ -58,7 +58,7 @@ func NewClient(deadlineRead, deadlineWrite, sleepDuration time.Duration, channel
 func (c *Client) ConnectIP(protocol Protocol, ip *net.IP, port int) (*Connection, error) {
 	//check protocol
 	if !isValidProtocol(protocol) {
-		return nil, Error{"Client", "Invalid protocol specified"}
+		return nil, Error{ErrorTypeFatal, "Client", "Invalid protocol specified"}
 	}
 
 	connection := &clientConnection{}
@@ -79,13 +79,18 @@ func (c *Client) ConnectIP(protocol Protocol, ip *net.IP, port int) (*Connection
 	//dial out and create a new nbnet connection
 	netConnection, err := net.Dial(protocolMap[protocol], connection.address)
 
+	if err != nil {
+		return nil, ErrorEmbedded{ErrorTypeFatal, "Client", "Unable to dial out", err}
+	}
+	
+	//create nbnet connection instance
 	c.waitGroup.Add(1)
 
-	connection.connection = newConnection(netConnection, c.channelSize, c.bufferSize,
+	connection.connection, err = newConnection(netConnection, c.channelSize, c.bufferSize,
 		c.deadlineRead, c.deadlineWrite, c.sleepDuration, &c.waitGroup)
-
+		
 	if err != nil {
-		return nil, ErrorEmbedded{"Client", "Unable to dial out", err}
+		return nil, ErrorEmbedded{ErrorTypeFatal, "Client", "Unable to create connection instance", err}
 	}
 
 	//new connection created, add it to the array
