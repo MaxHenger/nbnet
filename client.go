@@ -110,5 +110,11 @@ func (c *Client) Close() error {
 
 	//wait for all routines to finish
 	c.waitGroup.Wait()
+	
+	//close the con.Conn connection instances
+	for _, v := range c.connections {
+		v.connection.connection.Close()
+	}
+
 	return nil
 }

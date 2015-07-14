@@ -91,7 +91,6 @@ func serverRoutine(connections chan net.Conn, errors chan error, quit chan int, 
 		//check if a quit message is received
 		select {
 		case <-quit:
-			listener.Close()
 			return
 		default:
 			//make the select call non-blocking
@@ -299,4 +298,13 @@ func (s *Server) Close() {
 	//wait for all routines to finish
 	s.waitGroupConnections.Wait()
 	s.waitGroupListeners.Wait()
+	
+	//close the net.Conn and wrapListener instances
+	for _, v := range s.connections {
+		v.connection.Close()
+	}
+	
+	for _, v := range s.listeners {
+		v.listener.Close()
+	}
 }
