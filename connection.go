@@ -194,7 +194,7 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state EncryptionState) error {
 	if encr != nil {
 		//encryption should be performed
-		processed, err := encr.Encrypt(state, message)
+		encrypted, err := encr.Encrypt(state, message)
 		
 		if err != nil {
 			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to encrypt message", err}
@@ -203,9 +203,9 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state Enc
 		if sign != nil {
 			//signing should be performed as well
 			var buffer bytes.Buffer
-			buffer.Write(processed)
+			buffer.Write(encrypted)
 			
-			processed, err = sign.Sign(state, processed)
+			processed, err = sign.Sign(state, encrypted)
 			
 			if err != nil {
 				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message after encrypting", err}
@@ -217,8 +217,11 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state Enc
 			c.writing <- buffer.Bytes()
 		} else {
 			//encryption is performed, but signing should not be
-			c.writing <- processed
+			c.writing <- encrypted
 		}
+		
+		//update the encryption scheme
+		state.Update(encrypted)
 	} else {
 		if sign != nil {
 			//signing should be performed, encryption is not occurring
@@ -264,7 +267,7 @@ func (c *Connection) Receive(decr Decrypter, sign Signer, state EncryptionState)
 			if sign != nil {
 				//verify the result using the signer
 				ok, err := sign.Verify(state, retrieved, processed)
-				
+				state.Update(processed)
 				switch {
 				case err != nil:
 					//error while verifying message
@@ -277,6 +280,7 @@ func (c *Connection) Receive(decr Decrypter, sign Signer, state EncryptionState)
 					return processed, true, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received encrypted message failed", err}
 				}
 			} else {
+				state.Update(processed)
 				return processed, true, nil
 			}
 		}
