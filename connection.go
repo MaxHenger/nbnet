@@ -21,21 +21,6 @@ type Connection struct {
 	quit          chan int
 }
 
-func pack4(p []byte) (result int32) {
-	result |= int32(p[0]) << 24
-	result |= int32(p[1]) << 16
-	result |= int32(p[2]) << 8
-	result |= int32(p[3])
-	return
-}
-
-func unpack4(i int32) []byte {
-	return []byte{byte((i >> 24) & 0xFF), 
-				byte((i >> 16) & 0xFF), 
-				byte((i >> 8) & 0xFF), 
-				byte(i & 0xFF)}
-}
-
 func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors chan error, quit chan int,
 	deadlineRead, deadlineWrite, sleepDuration time.Duration, waitGroup *sync.WaitGroup, bufferSize int) {
 	if waitGroup != nil {
@@ -56,6 +41,11 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 			packet := make([]byte, 0, len(task) + 4)
 			packet = append(packet, unpack4(int32(len(task)))...)
 			packet = append(packet, task...)
+			
+			//make sure the packet is not too large to send
+			if len(packet) > PackageSizeMax {
+				errors <- Error{ErrorTypeWrite, "connectionRoutine", "Packet to send is too large"}
+			}
 
 			total := 0
 			for total < len(packet) {
@@ -86,10 +76,9 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 			//thread should quit
 			return
 		default:
-			//check if we can receive data from the current connection
-			connection.SetReadDeadline(time.Now().Add(deadlineRead))
-
 			for {
+				//check if we can receive data from the current connection
+				connection.SetReadDeadline(time.Now().Add(deadlineRead))
 				curBytesRead, err := connection.Read(localBuffer)
 
 				if curBytesRead != 0 {
@@ -100,6 +89,14 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 						if len(totalBuffer) >= 4 {
 							expectedSize = pack4(totalBuffer)
 							totalBuffer = totalBuffer[4:]
+							
+							if expectedSize > PackageSizeMax {
+								//the indicated length is way too big. Indicating something went
+								//terribly wrong, do not regard this as a reading error but a 
+								//fatal error
+								errors <- Error{ErrorTypeFatal, "connectionRoutine", "Received a specified package size exceeding the set limit"}
+								break
+							}
 						}
 					}
 					
@@ -205,7 +202,7 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state Enc
 			var buffer bytes.Buffer
 			buffer.Write(encrypted)
 			
-			processed, err = sign.Sign(state, encrypted)
+			processed, err := sign.Sign(state, encrypted)
 			
 			if err != nil {
 				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message after encrypting", err}

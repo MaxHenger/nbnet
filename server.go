@@ -281,6 +281,25 @@ func (s *Server) Update() (*Connection, bool, error) {
 	}
 }
 
+//CloseConnection(...) will close the single specified connection and its associated
+//routine.
+func (s *Server) CloseConnection(c *Connection) error {
+	//lazy, inefficient loopup. But the connection list is not intended to grow
+	//very large
+	for i, v := range s.connections {
+		if v == c {
+			//found the connection of interest
+			v.closeConnection()
+			s.waitGroupConnections.Add(-1)
+			v.connection.Close()
+			s.connections = append(s.connections[0:i], s.connections[i+1:]...)
+			return nil
+		}
+	}
+	
+	return Error{ErrorTypeNotFound, "Server", "Failed to close a connection"}
+}
+
 //Close(...) will close any connections, listeners and their associated routines.
 //This function used synchronizing WaitGroup types to ensure that all routines
 //have finished before this function returns.

@@ -1,6 +1,6 @@
 package nbnet
 
-type ErrorType uint8
+type ErrorType uint16
 
 const (
 	ErrorTypeWriteTimeout	ErrorType	= iota	//used when writing data and a timeout occurs
@@ -9,6 +9,7 @@ const (
 	ErrorTypeRead	//used when a non-timeout error occurs while reading
 	ErrorTypeInconsistent	//used when an inconsistent packet is retrieved
 	ErrorTypeWarning	//used when an error is not fatal to the program operation
+	ErrorTypeNotFound //used when an element is not found
 	ErrorTypeFatal	//used when the error is fatal to the program operation
 	ErrorTypeTotal	//the total number of ErrorTypeXXX constants
 )
@@ -19,8 +20,9 @@ const (
 	stringErrorTypeWrite = "Write"
 	stringErrorTypeRead = "Read"
 	stringErrorTypeWarning = "Warning"
+	stringErrorTypeNotFound = "Not found"
 	stringErrorTypeFatal = "Fatal"
-	stringErrorTypeUnknown = "UKNOWN"
+	stringErrorTypeUnknown = "UNKNOWN"
 )
 
 func (et ErrorType) String() string {
@@ -35,6 +37,8 @@ func (et ErrorType) String() string {
 		return stringErrorTypeRead
 	case ErrorTypeWarning:
 		return stringErrorTypeWarning
+	case ErrorTypeNotFound:
+		return stringErrorTypeNotFound
 	case ErrorTypeFatal:
 		return stringErrorTypeFatal
 	}
