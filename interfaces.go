@@ -1,20 +1,15 @@
 package nbnet
 
-type EncryptionState interface {
-	IV() []byte
-	Key() []byte
-	Update(encrypted []byte) error
-}
-
 type Encrypter interface {
-	Encrypt(state EncryptionState, message []byte) (encrypted []byte, err error)
+	Encrypt(message []byte) (encrypted []byte, err error)
+	Update() error
 }
 
 type Decrypter interface {
-	Decrypt(state EncryptionState, message []byte) (decrypted []byte, err error)
+	Decrypt(message []byte) (decrypted []byte, err error)
 }
 
 type Signer interface {
-	Sign(state EncryptionState, data []byte) ([]byte, error)
-	Verify(state EncryptionState, encrypted, message []byte) (ok bool, err error)
+	Sign(data []byte) ([]byte, error)
+	Verify(encrypted, message []byte) (ok bool, err error)
 }

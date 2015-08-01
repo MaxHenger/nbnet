@@ -48,29 +48,29 @@ func (et ErrorType) String() string {
 }
 
 type Error struct {
-	etype	ErrorType
-	source  string
-	message string
+	EType	ErrorType
+	Source  string
+	Message string
 }
 
 func (e Error) Error() string {
-	return e.source + "<" + e.etype.String() + ">: " + e.message
+	return e.Source + "<" + e.EType.String() + ">: " + e.Message
 }
 
 type ErrorEmbedded struct {
-	etype	ErrorType
-	source   string
-	message  string
-	embedded error
+	EType	ErrorType
+	Source   string
+	Message  string
+	Embedded error
 }
 
 func (e ErrorEmbedded) Error() string {
 	result := ""
 
-	if e.embedded != nil {
-		result += e.embedded.Error() + "\n"
+	if e.Embedded != nil {
+		result += e.Embedded.Error() + "\n"
 	}
 
-	result += e.source + "<" + e.etype.String() + ">: " + e.message
+	result += e.Source + "<" + e.EType.String() + ">: " + e.Message
 	return result
 }

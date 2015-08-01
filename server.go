@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"fmt"
 )
 
 //wrapListener is a dummy interface wrapping around the net.Listener interface
@@ -172,7 +173,7 @@ func NewServer(deadlineListen time.Duration, channelListen int,
 //
 //In case the listener is succesfully created the function will return an error
 //value of 'nil'
-func (s *Server) Listen(protocol Protocol, ip *net.IP, port int) error {
+func (s *Server) Listen(protocol Protocol, ip net.IP, port int) error {
 	//check input arguments for errors
 	if !isValidProtocol(protocol) {
 		return Error{ErrorTypeFatal, "NewServer", "Invalid protocol specified"}
@@ -289,8 +290,10 @@ func (s *Server) CloseConnection(c *Connection) error {
 	for i, v := range s.connections {
 		if v == c {
 			//found the connection of interest
-			v.closeConnection()
-			s.waitGroupConnections.Add(-1)
+			if !v.isClosed {
+				v.closeConnection()
+			}
+			
 			v.connection.Close()
 			s.connections = append(s.connections[0:i], s.connections[i+1:]...)
 			return nil
@@ -306,7 +309,12 @@ func (s *Server) CloseConnection(c *Connection) error {
 func (s *Server) Close() {
 	//signal all connection routines to close down
 	for _, v := range s.connections {
-		v.closeConnection()
+		if !v.isClosed {
+			fmt.Println("Closing connection:")
+			v.closeConnection()
+		} else {
+			fmt.Println("Connection already closed:")
+		}
 	}
 
 	//signal all listening routines to close down
