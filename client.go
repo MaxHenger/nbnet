@@ -55,7 +55,7 @@ func NewClient(deadlineRead, deadlineWrite, sleepDuration time.Duration, channel
 //IP-address and port. It will do so using the specified protocol. In case the
 //function succeeds, implying the error return value is nil, the returned
 //connection pointer can be used to send and receive data.
-func (c *Client) ConnectIP(protocol Protocol, ip *net.IP, port int) (*Connection, error) {
+func (c *Client) ConnectIP(protocol Protocol, ip net.IP, port int) (*Connection, error) {
 	//check protocol
 	if !isValidProtocol(protocol) {
 		return nil, Error{ErrorTypeFatal, "Client", "Invalid protocol specified"}
@@ -105,7 +105,10 @@ func (c *Client) CloseConnection(con *Connection) error {
 	for i, v := range c.connections {
 		if v.connection == con {
 			//found the connection, close and remove it
-			v.connection.closeConnection()
+			if !v.connection.isClosed {
+				v.connection.closeConnection()
+			}
+			
 			c.waitGroup.Add(-1)
 			v.connection.connection.Close()
 			c.connections = append(c.connections[:i], c.connections[i+1:]...)
@@ -123,7 +126,9 @@ func (c *Client) Close() error {
 	//loop through all created connections
 	for _, val := range c.connections {
 		//signal the thread to quit
-		val.connection.closeConnection()
+		if !val.connection.isClosed {
+			val.connection.closeConnection()
+		}
 	}
 
 	//wait for all routines to finish

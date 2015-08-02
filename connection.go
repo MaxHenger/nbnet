@@ -5,21 +5,33 @@ import (
 	"sync"
 	"time"
 	"bytes"
+	"io"
 )
 
 const PackageSizeMax = 256000000 //= 256 mb
 const PackageSizeMin = 4 //=4 b
 
 type Connection struct {
-	connection    net.Conn
-	deadlineRead  time.Duration
-	deadlineWrite time.Duration
-	sleepDuration time.Duration
-	reading       chan []byte
-	writing       chan []byte
-	errors        chan error
-	quit          chan int
+	connection    net.Conn //the net package connection
+	deadlineRead  time.Duration //the duration after which the read method times out
+	deadlineWrite time.Duration //the duration after which the write method times out
+	sleepDuration time.Duration //the sleep duration if there is nothing to read and write
+	reading       chan []byte //channel for returning received data from the connection routine
+	writing       chan []byte //channel to send data to the connection routine
+	errors        chan error //channel for returning errors originating from the connection routine
+	quit          chan int //channel used to indicate that the connection routine should quit, or used by the connection routine 
+	isClosed		bool //value is set to true if the connection is closed
 }
+
+type ConnectionMessage uint8
+
+const (
+	ConnectionMessageNothing ConnectionMessage = iota
+	ConnectionMessageData
+	ConnectionMessageClosed
+	ConnectionMessageWarning
+	ConnectionMessageError
+)
 
 func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors chan error, quit chan int,
 	deadlineRead, deadlineWrite, sleepDuration time.Duration, waitGroup *sync.WaitGroup, bufferSize int) {
@@ -119,6 +131,14 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 				}
 
 				if err != nil {
+					//check if the connection is closed
+					if err == io.EOF {
+						//the connection is closed, signal the main routine and
+						//return
+						quit <- 1
+						return
+					}
+
 					//check what kind of error is returned
 					switch err := err.(type) { //this shadow the previous err definition
 					case net.Error:
@@ -176,7 +196,7 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 	
 	//Create new connection
 	newConnection := &Connection{connection, deadlineRead, deadlineWrite, sleep,
-		make(chan []byte, channelSize), make(chan []byte, channelSize), make(chan error, channelSize), make(chan int)}
+		make(chan []byte, channelSize), make(chan []byte, channelSize), make(chan error, channelSize), make(chan int), false}
 
 	//create the go routine belonging to the new connection
 	go connectionRoutine(newConnection.connection, newConnection.reading, newConnection.writing,
@@ -188,10 +208,10 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 //Connection.Send(...) will push the data to-be-sent onto the channel that will
 //be read by the connection routine. The routine will actually send the data.
 //Hence make sure that the data is being retained in memory until it is sent
-func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state EncryptionState) error {
+func (c *Connection) Send(message []byte, encr Encrypter, sign Signer) error {
 	if encr != nil {
 		//encryption should be performed
-		encrypted, err := encr.Encrypt(state, message)
+		encrypted, err := encr.Encrypt(message)
 		
 		if err != nil {
 			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to encrypt message", err}
@@ -202,7 +222,7 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state Enc
 			var buffer bytes.Buffer
 			buffer.Write(encrypted)
 			
-			processed, err := sign.Sign(state, encrypted)
+			processed, err := sign.Sign(encrypted)
 			
 			if err != nil {
 				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message after encrypting", err}
@@ -212,20 +232,28 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state Enc
 			
 			//send encrypted and signed message through channel
 			c.writing <- buffer.Bytes()
+			
+			err = encr.Update()
+			if err != nil {
+				//error while updating the encryptor
+				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to update the encryptor", err}
+			}
 		} else {
 			//encryption is performed, but signing should not be
 			c.writing <- encrypted
+			
+			err = encr.Update()
+			if err != nil {
+				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to update the encryptor", err}
+			}
 		}
-		
-		//update the encryption scheme
-		state.Update(encrypted)
 	} else {
 		if sign != nil {
 			//signing should be performed, encryption is not occurring
 			var buffer bytes.Buffer
 			buffer.Write(message)
 			
-			processed, err := sign.Sign(state, message)
+			processed, err := sign.Sign(message)
 			
 			if err != nil {
 				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message", err}
@@ -250,64 +278,102 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state Enc
 // 1) non-nil, true, nil: Data is returned from the routine, no error ocurred
 // 2) nil, false, nil: No data is returned, no error ocurred
 // 3) nil, false, non-nil: An error has been returned from the routine
-func (c *Connection) Receive(decr Decrypter, sign Signer, state EncryptionState) ([]byte, bool, error) {
+func (c *Connection) Receive(decr Decrypter, sign Signer) ([]byte, ConnectionMessage, error) {
 	select {
 	case retrieved := <-c.reading:
 		//received new data, decrypt it if required
 		if decr != nil {
-			processed, err := decr.Decrypt(state, retrieved)
+			processed, err := decr.Decrypt(retrieved)
 			
 			if err != nil {
-				return nil, false, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to decrypt received message", err}
+				return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to decrypt received message", err}
 			}
 			
 			if sign != nil {
 				//verify the result using the signer
-				ok, err := sign.Verify(state, retrieved, processed)
-				state.Update(processed)
+				ok, err := sign.Verify(retrieved, processed)
 				switch {
 				case err != nil:
 					//error while verifying message
-					return nil, false, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received encrypted message", err}
+					return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received encrypted message", err}
 				case ok:
 					//message was decrypted and verified to be correct
-					return processed, true, nil
+					return processed, ConnectionMessageData, nil
 				default:
 					//message was decrypted but probably forged/incorrectly received
-					return processed, true, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received encrypted message failed", err}
+					return processed, ConnectionMessageError, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received encrypted message failed", err}
 				}
 			} else {
-				state.Update(processed)
-				return processed, true, nil
+				return processed, ConnectionMessageData, nil
 			}
 		}
 
 		//if this code is reached the message should not be decrypted
 		if sign != nil {
 			//but it should be verified
-			ok, err := sign.Verify(state, nil, retrieved)
+			ok, err := sign.Verify(nil, retrieved)
 			
 			switch {
 			case err != nil:
 				//error while verifying message
-				return nil, false, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received message", err}
+				return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received message", err}
 			case ok:
 				//message was verified to be correct
-				return retrieved, true, nil
+				return retrieved, ConnectionMessageData, nil
 			default:
 				//verification of the message failed
-				return retrieved, true, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received message failed", err}
+				return retrieved, ConnectionMessageError, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received message failed", err}
 			}
 		}
 
 		//if this code is reached the message should be decrypted nor verified
-		return retrieved, true, nil
+		return retrieved, ConnectionMessageData, nil
 	case recvError := <- c.errors:
-		//received an error from the connection routine
-		return nil, false, recvError
+		//received an error from the connection routine. Using the nbnet package
+		//will involve often checking if an error is simply a warning or an 
+		//actual error. Hence do this for the user already
+		err, ok := recvError.(Error)
+		
+		if ok {
+			//dealing with a normal, non-embedded, error
+			switch (err.EType) {
+			case ErrorTypeWarning:
+				return nil, ConnectionMessageWarning, recvError
+			default:
+				return nil, ConnectionMessageError, recvError
+			}
+		}
+		
+		errEmbedded, ok := recvError.(ErrorEmbedded)
+
+		if ok {
+			//this is an embedded error
+			switch (errEmbedded.EType) {
+			case ErrorTypeWarning:
+				return nil, ConnectionMessageWarning, recvError
+			default:
+				return nil, ConnectionMessageError, recvError
+			}
+		}
+		
+		//unknown error type
+		return nil, ConnectionMessageError, recvError
+	case <- c.quit:
+		//the routine has quit, indicating the connection has closed
+		c.isClosed = true
+		return nil, ConnectionMessageClosed, nil
 	default:
-		return nil, false, nil
+		return nil, ConnectionMessageNothing, nil
 	}
+}
+
+//Connection.LocalAddress(...) will return the local address of the connection
+func (c *Connection) LocalAddress() net.Addr {
+	return c.connection.LocalAddr()
+}
+
+func (c *Connection) RemoteAddress() net.Addr {
+	return c.connection.RemoteAddr()
 }
 
 //Connection.closeConnection(...) will close the associated net.Conn type and
@@ -315,5 +381,15 @@ func (c *Connection) Receive(decr Decrypter, sign Signer, state EncryptionState)
 //but the 'close' word is already reserved by go, and its a non-exported function
 //anyway
 func (c *Connection) closeConnection() {
-	c.quit <- 1
+	//make sure (as the quit channel is unbuffered) that it isn't already filled.
+	//This can occur if the connection is closed, the user doesn't call the 
+	//connection's Receive(...) function to handle the filled quit channel and
+	//then calls the closeConnection(...) function.
+	select {
+		case <- c.quit: //just here to empty the buffer
+		default:
+			c.quit <- 1
+	}
+	
+	c.isClosed = true
 }
