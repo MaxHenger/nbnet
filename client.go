@@ -99,6 +99,24 @@ func (c *Client) ConnectIP(protocol Protocol, ip *net.IP, port int) (*Connection
 	return connection.connection, nil
 }
 
+//CloseConnection(...) will close a single connection and the associated routine
+func (c *Client) CloseConnection(con *Connection) error {
+	//find the connection
+	for i, v := range c.connections {
+		if v.connection == con {
+			//found the connection, close and remove it
+			v.connection.closeConnection()
+			c.waitGroup.Add(-1)
+			v.connection.connection.Close()
+			c.connections = append(c.connections[:i], c.connections[i+1:]...)
+			return nil
+		}
+	}
+	
+	//did not find the connection
+	return Error{ErrorTypeNotFound, "Client", "Failed to close a connection"}
+}
+
 //Client.Close(...) will send messages to all connections created through this
 //managing type and wait for all of the routines to finish.
 func (c *Client) Close() error {
@@ -110,5 +128,11 @@ func (c *Client) Close() error {
 
 	//wait for all routines to finish
 	c.waitGroup.Wait()
+	
+	//close the con.Conn connection instances
+	for _, v := range c.connections {
+		v.connection.connection.Close()
+	}
+
 	return nil
 }

@@ -4,7 +4,11 @@ import (
 	"net"
 	"sync"
 	"time"
+	"bytes"
 )
+
+const PackageSizeMax = 256000000 //= 256 mb
+const PackageSizeMin = 4 //=4 b
 
 type Connection struct {
 	connection    net.Conn
@@ -25,20 +29,29 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 		defer waitGroup.Done()
 	}
 
-	localBuffer := make([]byte, bufferSize)
-	totalBuffer := make([]byte, 0, bufferSize)
+	localBuffer := make([]byte, bufferSize)		//buffer to receive data into
+	totalBuffer := make([]byte, 0, bufferSize)	//buffer that increases in size as package is built up
+	expectedSize := int32(-1)					//expected size of the incoming package
 
 	for {
 		//check if there is something to write
 		select {
-		case task := <-writing:
+		case task := <- writing:
 			//new writing task
-			connection.SetWriteDeadline(time.Now().Add(deadlineWrite))
+			packet := make([]byte, 0, len(task) + 4)
+			packet = append(packet, unpack4(int32(len(task)))...)
+			packet = append(packet, task...)
+			
+			//make sure the packet is not too large to send
+			if len(packet) > PackageSizeMax {
+				errors <- Error{ErrorTypeWrite, "connectionRoutine", "Packet to send is too large"}
+			}
 
 			total := 0
-			for total < len(task) {
+			for total < len(packet) {
 				//write all data
-				written, err := connection.Write(task)
+				connection.SetWriteDeadline(time.Now().Add(deadlineWrite))
+				written, err := connection.Write(packet)
 				if err != nil {
 					//figure out what kind of error is received, as this might
 					//have an impact on how the user managing this routine has
@@ -59,21 +72,50 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 
 				total += written
 			}
-		case <-quit:
+		case <- quit:
 			//thread should quit
-			connection.Close()
 			return
 		default:
-			//check if we can receive data from the current connection
-			connection.SetReadDeadline(time.Now().Add(deadlineRead))
-			totalBytesRead := 0
-
 			for {
-				bytesRead, err := connection.Read(localBuffer)
-				totalBytesRead += bytesRead
+				//check if we can receive data from the current connection
+				connection.SetReadDeadline(time.Now().Add(deadlineRead))
+				curBytesRead, err := connection.Read(localBuffer)
 
-				if bytesRead != 0 {
-					totalBuffer = append(totalBuffer, localBuffer[:bytesRead]...)
+				if curBytesRead != 0 {
+					totalBuffer = append(totalBuffer, localBuffer[:curBytesRead]...)
+
+					if expectedSize == -1 {
+						//only attempt to retrieve the size if there is enough data
+						if len(totalBuffer) >= 4 {
+							expectedSize = pack4(totalBuffer)
+							totalBuffer = totalBuffer[4:]
+							
+							if expectedSize > PackageSizeMax {
+								//the indicated length is way too big. Indicating something went
+								//terribly wrong, do not regard this as a reading error but a 
+								//fatal error
+								errors <- Error{ErrorTypeFatal, "connectionRoutine", "Received a specified package size exceeding the set limit"}
+								break
+							}
+						}
+					}
+					
+					//is there enough data for a single package
+					for expectedSize != -1 && int32(len(totalBuffer)) >= expectedSize {
+						//there is, return the current buffer section
+						reading <- totalBuffer[:expectedSize]
+						expectedOld := expectedSize
+						
+						if int32(len(totalBuffer)) - expectedSize >= 4 {
+							//we can extract a new buffer size
+							expectedSize = pack4(totalBuffer[expectedSize:])
+							totalBuffer = totalBuffer[expectedOld + 4:]
+						} else {
+							//no new buffer size can be extracted
+							expectedSize = -1
+							totalBuffer = totalBuffer[expectedOld:]
+						}
+					}
 				}
 
 				if err != nil {
@@ -83,16 +125,7 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 						if err.Timeout() {
 							//net timeout error. If any bytes were read this is
 							//not a problem at all
-							if totalBytesRead != 0 {
-								//full package read, return the package
-								//TODO: Figure out when this is actually not an error
-								//and this is an error.
-								reading <- totalBuffer
-							} else {
-								//no data read and a timeout error, this is the
-								//cue to let the current routine sleep
-								time.Sleep(sleepDuration)
-							}
+							time.Sleep(sleepDuration)
 						} else {
 							errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A net non-timeout error occurred while receiving data", err}
 						}
@@ -102,12 +135,6 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 					//whatever happened, this is the cue to stop reading
 					break
 				}
-			}
-
-			if totalBytesRead != 0 {
-				//Create a new buffer (the old one is being sent back to the main
-				//routine as a slice) with the same capacity as the old one
-				totalBuffer = make([]byte, 0, cap(totalBuffer))
 			}
 		}
 	}
@@ -161,9 +188,59 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 //Connection.Send(...) will push the data to-be-sent onto the channel that will
 //be read by the connection routine. The routine will actually send the data.
 //Hence make sure that the data is being retained in memory until it is sent
-func (c *Connection) Send(p []byte) error {
-	//send the provided data through the channel
-	c.writing <- p
+func (c *Connection) Send(message []byte, encr Encrypter, sign Signer, state EncryptionState) error {
+	if encr != nil {
+		//encryption should be performed
+		encrypted, err := encr.Encrypt(state, message)
+		
+		if err != nil {
+			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to encrypt message", err}
+		}
+		
+		if sign != nil {
+			//signing should be performed as well
+			var buffer bytes.Buffer
+			buffer.Write(encrypted)
+			
+			processed, err := sign.Sign(state, encrypted)
+			
+			if err != nil {
+				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message after encrypting", err}
+			}
+			
+			buffer.Write(processed)
+			
+			//send encrypted and signed message through channel
+			c.writing <- buffer.Bytes()
+		} else {
+			//encryption is performed, but signing should not be
+			c.writing <- encrypted
+		}
+		
+		//update the encryption scheme
+		state.Update(encrypted)
+	} else {
+		if sign != nil {
+			//signing should be performed, encryption is not occurring
+			var buffer bytes.Buffer
+			buffer.Write(message)
+			
+			processed, err := sign.Sign(state, message)
+			
+			if err != nil {
+				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message", err}
+			}
+			
+			buffer.Write(processed)
+			
+			//send signed message through channel
+			c.writing <- buffer.Bytes()
+		} else {
+			//only send message, without encryption and without signing
+			c.writing <- message
+		}
+	}
+	
 	return nil
 }
 
@@ -173,12 +250,59 @@ func (c *Connection) Send(p []byte) error {
 // 1) non-nil, true, nil: Data is returned from the routine, no error ocurred
 // 2) nil, false, nil: No data is returned, no error ocurred
 // 3) nil, false, non-nil: An error has been returned from the routine
-func (c *Connection) Receive() ([]byte, bool, error) {
+func (c *Connection) Receive(decr Decrypter, sign Signer, state EncryptionState) ([]byte, bool, error) {
 	select {
 	case retrieved := <-c.reading:
-		//received new data
+		//received new data, decrypt it if required
+		if decr != nil {
+			processed, err := decr.Decrypt(state, retrieved)
+			
+			if err != nil {
+				return nil, false, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to decrypt received message", err}
+			}
+			
+			if sign != nil {
+				//verify the result using the signer
+				ok, err := sign.Verify(state, retrieved, processed)
+				state.Update(processed)
+				switch {
+				case err != nil:
+					//error while verifying message
+					return nil, false, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received encrypted message", err}
+				case ok:
+					//message was decrypted and verified to be correct
+					return processed, true, nil
+				default:
+					//message was decrypted but probably forged/incorrectly received
+					return processed, true, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received encrypted message failed", err}
+				}
+			} else {
+				state.Update(processed)
+				return processed, true, nil
+			}
+		}
+
+		//if this code is reached the message should not be decrypted
+		if sign != nil {
+			//but it should be verified
+			ok, err := sign.Verify(state, nil, retrieved)
+			
+			switch {
+			case err != nil:
+				//error while verifying message
+				return nil, false, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received message", err}
+			case ok:
+				//message was verified to be correct
+				return retrieved, true, nil
+			default:
+				//verification of the message failed
+				return retrieved, true, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received message failed", err}
+			}
+		}
+
+		//if this code is reached the message should be decrypted nor verified
 		return retrieved, true, nil
-	case recvError := <-c.errors:
+	case recvError := <- c.errors:
 		//received an error from the connection routine
 		return nil, false, recvError
 	default:

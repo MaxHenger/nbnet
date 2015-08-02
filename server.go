@@ -91,7 +91,6 @@ func serverRoutine(connections chan net.Conn, errors chan error, quit chan int, 
 		//check if a quit message is received
 		select {
 		case <-quit:
-			listener.Close()
 			return
 		default:
 			//make the select call non-blocking
@@ -282,6 +281,25 @@ func (s *Server) Update() (*Connection, bool, error) {
 	}
 }
 
+//CloseConnection(...) will close the single specified connection and its associated
+//routine.
+func (s *Server) CloseConnection(c *Connection) error {
+	//lazy, inefficient loopup. But the connection list is not intended to grow
+	//very large
+	for i, v := range s.connections {
+		if v == c {
+			//found the connection of interest
+			v.closeConnection()
+			s.waitGroupConnections.Add(-1)
+			v.connection.Close()
+			s.connections = append(s.connections[0:i], s.connections[i+1:]...)
+			return nil
+		}
+	}
+	
+	return Error{ErrorTypeNotFound, "Server", "Failed to close a connection"}
+}
+
 //Close(...) will close any connections, listeners and their associated routines.
 //This function used synchronizing WaitGroup types to ensure that all routines
 //have finished before this function returns.
@@ -299,4 +317,13 @@ func (s *Server) Close() {
 	//wait for all routines to finish
 	s.waitGroupConnections.Wait()
 	s.waitGroupListeners.Wait()
+	
+	//close the net.Conn and wrapListener instances
+	for _, v := range s.connections {
+		v.connection.Close()
+	}
+	
+	for _, v := range s.listeners {
+		v.listener.Close()
+	}
 }

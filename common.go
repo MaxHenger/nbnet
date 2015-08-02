@@ -1,5 +1,20 @@
 package nbnet
 
+func pack4(p []byte) (result int32) {
+	result |= int32(p[0]) << 24
+	result |= int32(p[1]) << 16
+	result |= int32(p[2]) << 8
+	result |= int32(p[3])
+	return
+}
+
+func unpack4(i int32) []byte {
+	return []byte{byte((i >> 24) & 0xFF), 
+				byte((i >> 16) & 0xFF), 
+				byte((i >> 8) & 0xFF), 
+				byte(i & 0xFF)}
+}
+
 //Protocol is the typedefinition of a c-style enumeration specifying the various
 //allowed connection protocols
 type Protocol int
