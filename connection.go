@@ -4,7 +4,6 @@ import (
 	"net"
 	"sync"
 	"time"
-	"bytes"
 	"io"
 )
 
@@ -134,8 +133,14 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 					//check if the connection is closed
 					if err == io.EOF {
 						//the connection is closed, signal the main routine and
-						//return
-						quit <- 1
+						//return. The following 'select' section is necessary
+						//to resolve any possible deadlocks						
+						select {
+						case <- quit:
+						default:
+							quit <- 1
+						}
+						
 						return
 					}
 
@@ -208,7 +213,7 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 //Connection.Send(...) will push the data to-be-sent onto the channel that will
 //be read by the connection routine. The routine will actually send the data.
 //Hence make sure that the data is being retained in memory until it is sent
-func (c *Connection) Send(message []byte, encr Encrypter, sign Signer) error {
+func (c *Connection) Send(message []byte, encr Encrypter) error {
 	if encr != nil {
 		//encryption should be performed
 		encrypted, err := encr.Encrypt(message)
@@ -217,56 +222,15 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer) error {
 			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to encrypt message", err}
 		}
 		
-		if sign != nil {
-			//signing should be performed as well
-			var buffer bytes.Buffer
-			buffer.Write(encrypted)
-			
-			processed, err := sign.Sign(encrypted)
-			
-			if err != nil {
-				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message after encrypting", err}
-			}
-			
-			buffer.Write(processed)
-			
-			//send encrypted and signed message through channel
-			c.writing <- buffer.Bytes()
-			
-			err = encr.Update()
-			if err != nil {
-				//error while updating the encryptor
-				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to update the encryptor", err}
-			}
-		} else {
-			//encryption is performed, but signing should not be
-			c.writing <- encrypted
-			
-			err = encr.Update()
-			if err != nil {
-				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to update the encryptor", err}
-			}
+		//encryption is performed, but signing should not be
+		c.writing <- encrypted
+		
+		if err != nil {
+			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to update the encryptor", err}
 		}
 	} else {
-		if sign != nil {
-			//signing should be performed, encryption is not occurring
-			var buffer bytes.Buffer
-			buffer.Write(message)
-			
-			processed, err := sign.Sign(message)
-			
-			if err != nil {
-				return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to sign message", err}
-			}
-			
-			buffer.Write(processed)
-			
-			//send signed message through channel
-			c.writing <- buffer.Bytes()
-		} else {
-			//only send message, without encryption and without signing
-			c.writing <- message
-		}
+			//only send message, without encryption
+		c.writing <- message
 	}
 	
 	return nil
@@ -278,7 +242,7 @@ func (c *Connection) Send(message []byte, encr Encrypter, sign Signer) error {
 // 1) non-nil, true, nil: Data is returned from the routine, no error ocurred
 // 2) nil, false, nil: No data is returned, no error ocurred
 // 3) nil, false, non-nil: An error has been returned from the routine
-func (c *Connection) Receive(decr Decrypter, sign Signer) ([]byte, ConnectionMessage, error) {
+func (c *Connection) Receive(decr Decrypter) ([]byte, ConnectionMessage, error) {
 	select {
 	case retrieved := <-c.reading:
 		//received new data, decrypt it if required
@@ -289,44 +253,10 @@ func (c *Connection) Receive(decr Decrypter, sign Signer) ([]byte, ConnectionMes
 				return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to decrypt received message", err}
 			}
 			
-			if sign != nil {
-				//verify the result using the signer
-				ok, err := sign.Verify(retrieved, processed)
-				switch {
-				case err != nil:
-					//error while verifying message
-					return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received encrypted message", err}
-				case ok:
-					//message was decrypted and verified to be correct
-					return processed, ConnectionMessageData, nil
-				default:
-					//message was decrypted but probably forged/incorrectly received
-					return processed, ConnectionMessageError, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received encrypted message failed", err}
-				}
-			} else {
-				return processed, ConnectionMessageData, nil
-			}
+			return processed, ConnectionMessageData, nil
 		}
 
 		//if this code is reached the message should not be decrypted
-		if sign != nil {
-			//but it should be verified
-			ok, err := sign.Verify(nil, retrieved)
-			
-			switch {
-			case err != nil:
-				//error while verifying message
-				return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to verify received message", err}
-			case ok:
-				//message was verified to be correct
-				return retrieved, ConnectionMessageData, nil
-			default:
-				//verification of the message failed
-				return retrieved, ConnectionMessageError, ErrorEmbedded{ErrorTypeInconsistent, "Connection", "Verification of received message failed", err}
-			}
-		}
-
-		//if this code is reached the message should be decrypted nor verified
 		return retrieved, ConnectionMessageData, nil
 	case recvError := <- c.errors:
 		//received an error from the connection routine. Using the nbnet package

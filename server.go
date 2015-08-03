@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	"fmt"
 )
 
 //wrapListener is a dummy interface wrapping around the net.Listener interface
@@ -310,10 +309,8 @@ func (s *Server) Close() {
 	//signal all connection routines to close down
 	for _, v := range s.connections {
 		if !v.isClosed {
-			fmt.Println("Closing connection:")
 			v.closeConnection()
 		} else {
-			fmt.Println("Connection already closed:")
 		}
 	}
 
