@@ -1,25 +1,25 @@
 package nbnet
 
 import (
+	"io"
 	"net"
 	"sync"
 	"time"
-	"io"
 )
 
 const PackageSizeMax = 256000000 //= 256 mb
-const PackageSizeMin = 4 //=4 b
+const PackageSizeMin = 4         //=4 b
 
 type Connection struct {
-	connection    net.Conn //the net package connection
+	connection    net.Conn      //the net package connection
 	deadlineRead  time.Duration //the duration after which the read method times out
 	deadlineWrite time.Duration //the duration after which the write method times out
 	sleepDuration time.Duration //the sleep duration if there is nothing to read and write
-	reading       chan []byte //channel for returning received data from the connection routine
-	writing       chan []byte //channel to send data to the connection routine
-	errors        chan error //channel for returning errors originating from the connection routine
-	quit          chan int //channel used to indicate that the connection routine should quit, or used by the connection routine 
-	isClosed		bool //value is set to true if the connection is closed
+	reading       chan []byte   //channel for returning received data from the connection routine
+	writing       chan []byte   //channel to send data to the connection routine
+	errors        chan error    //channel for returning errors originating from the connection routine
+	quit          chan int      //channel used to indicate that the connection routine should quit, or used by the connection routine
+	isClosed      bool          //value is set to true if the connection is closed
 }
 
 type ConnectionMessage uint8
@@ -40,19 +40,19 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 		defer waitGroup.Done()
 	}
 
-	localBuffer := make([]byte, bufferSize)		//buffer to receive data into
-	totalBuffer := make([]byte, 0, bufferSize)	//buffer that increases in size as package is built up
-	expectedSize := int32(-1)					//expected size of the incoming package
+	localBuffer := make([]byte, bufferSize)    //buffer to receive data into
+	totalBuffer := make([]byte, 0, bufferSize) //buffer that increases in size as package is built up
+	expectedSize := int32(-1)                  //expected size of the incoming package
 
 	for {
 		//check if there is something to write
 		select {
-		case task := <- writing:
+		case task := <-writing:
 			//new writing task
-			packet := make([]byte, 0, len(task) + 4)
+			packet := make([]byte, 0, len(task)+4)
 			packet = append(packet, unpack4(int32(len(task)))...)
 			packet = append(packet, task...)
-			
+
 			//make sure the packet is not too large to send
 			if len(packet) > PackageSizeMax {
 				errors <- Error{ErrorTypeWrite, "connectionRoutine", "Packet to send is too large"}
@@ -83,7 +83,7 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 
 				total += written
 			}
-		case <- quit:
+		case <-quit:
 			//thread should quit
 			return
 		default:
@@ -100,27 +100,27 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 						if len(totalBuffer) >= 4 {
 							expectedSize = pack4(totalBuffer)
 							totalBuffer = totalBuffer[4:]
-							
+
 							if expectedSize > PackageSizeMax {
 								//the indicated length is way too big. Indicating something went
-								//terribly wrong, do not regard this as a reading error but a 
+								//terribly wrong, do not regard this as a reading error but a
 								//fatal error
 								errors <- Error{ErrorTypeFatal, "connectionRoutine", "Received a specified package size exceeding the set limit"}
 								break
 							}
 						}
 					}
-					
+
 					//is there enough data for a single package
 					for expectedSize != -1 && int32(len(totalBuffer)) >= expectedSize {
 						//there is, return the current buffer section
 						reading <- totalBuffer[:expectedSize]
 						expectedOld := expectedSize
-						
-						if int32(len(totalBuffer)) - expectedSize >= 4 {
+
+						if int32(len(totalBuffer))-expectedSize >= 4 {
 							//we can extract a new buffer size
 							expectedSize = pack4(totalBuffer[expectedSize:])
-							totalBuffer = totalBuffer[expectedOld + 4:]
+							totalBuffer = totalBuffer[expectedOld+4:]
 						} else {
 							//no new buffer size can be extracted
 							expectedSize = -1
@@ -134,13 +134,13 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 					if err == io.EOF {
 						//the connection is closed, signal the main routine and
 						//return. The following 'select' section is necessary
-						//to resolve any possible deadlocks						
+						//to resolve any possible deadlocks
 						select {
-						case <- quit:
+						case <-quit:
 						default:
 							quit <- 1
 						}
-						
+
 						return
 					}
 
@@ -151,11 +151,14 @@ func connectionRoutine(connection net.Conn, reading, writing chan []byte, errors
 							//net timeout error. If any bytes were read this is
 							//not a problem at all
 							time.Sleep(sleepDuration)
+						} else if err.Temporary() {
+							//temporary error
+							errors <- ErrorEmbedded{ErrorTypeWarning, "connectionRoutine", "A temporary net error occurred while receiving data", err}
 						} else {
-							errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A net non-timeout error occurred while receiving data", err}
+							errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A fatal net error ocurred while receiving data", err}
 						}
 					default:
-						errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A generic error ocurred while receiving data", err}
+						errors <- ErrorEmbedded{ErrorTypeRead, "connectionRoutine", "A fatal error ocurred while receiving data", err}
 					}
 					//whatever happened, this is the cue to stop reading
 					break
@@ -186,19 +189,19 @@ func newConnection(connection net.Conn, channelSize, bufferSize int, deadlineRea
 	if channelSize < 1 {
 		return nil, Error{ErrorTypeFatal, "newConnection", "Channel size is too small"}
 	}
-	
+
 	if bufferSize < 1 {
 		return nil, Error{ErrorTypeFatal, "newConnection", "Buffer size is too small"}
 	}
-	
+
 	if deadlineRead <= 0 {
 		return nil, Error{ErrorTypeFatal, "newConnection", "Reading deadline duration is too small"}
 	}
-	
+
 	if deadlineWrite <= 0 {
 		return nil, Error{ErrorTypeFatal, "newConnection", "Writing deadline duration is too small"}
 	}
-	
+
 	//Create new connection
 	newConnection := &Connection{connection, deadlineRead, deadlineWrite, sleep,
 		make(chan []byte, channelSize), make(chan []byte, channelSize), make(chan error, channelSize), make(chan int), false}
@@ -217,22 +220,22 @@ func (c *Connection) Send(message []byte, encr Encrypter) error {
 	if encr != nil {
 		//encryption should be performed
 		encrypted, err := encr.Encrypt(message)
-		
+
 		if err != nil {
 			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to encrypt message", err}
 		}
-		
+
 		//encryption is performed, but signing should not be
 		c.writing <- encrypted
-		
+
 		if err != nil {
 			return ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to update the encryptor", err}
 		}
 	} else {
-			//only send message, without encryption
+		//only send message, without encryption
 		c.writing <- message
 	}
-	
+
 	return nil
 }
 
@@ -248,47 +251,47 @@ func (c *Connection) Receive(decr Decrypter) ([]byte, ConnectionMessage, error) 
 		//received new data, decrypt it if required
 		if decr != nil {
 			processed, err := decr.Decrypt(retrieved)
-			
+
 			if err != nil {
 				return nil, ConnectionMessageError, ErrorEmbedded{ErrorTypeFatal, "Connection", "Failed to decrypt received message", err}
 			}
-			
+
 			return processed, ConnectionMessageData, nil
 		}
 
 		//if this code is reached the message should not be decrypted
 		return retrieved, ConnectionMessageData, nil
-	case recvError := <- c.errors:
+	case recvError := <-c.errors:
 		//received an error from the connection routine. Using the nbnet package
-		//will involve often checking if an error is simply a warning or an 
+		//will involve often checking if an error is simply a warning or an
 		//actual error. Hence do this for the user already
 		err, ok := recvError.(Error)
-		
+
 		if ok {
 			//dealing with a normal, non-embedded, error
-			switch (err.EType) {
+			switch err.EType {
 			case ErrorTypeWarning:
 				return nil, ConnectionMessageWarning, recvError
 			default:
 				return nil, ConnectionMessageError, recvError
 			}
 		}
-		
+
 		errEmbedded, ok := recvError.(ErrorEmbedded)
 
 		if ok {
 			//this is an embedded error
-			switch (errEmbedded.EType) {
+			switch errEmbedded.EType {
 			case ErrorTypeWarning:
 				return nil, ConnectionMessageWarning, recvError
 			default:
 				return nil, ConnectionMessageError, recvError
 			}
 		}
-		
+
 		//unknown error type
 		return nil, ConnectionMessageError, recvError
-	case <- c.quit:
+	case <-c.quit:
 		//the routine has quit, indicating the connection has closed
 		c.isClosed = true
 		return nil, ConnectionMessageClosed, nil
@@ -312,14 +315,14 @@ func (c *Connection) RemoteAddress() net.Addr {
 //anyway
 func (c *Connection) closeConnection() {
 	//make sure (as the quit channel is unbuffered) that it isn't already filled.
-	//This can occur if the connection is closed, the user doesn't call the 
+	//This can occur if the connection is closed, the user doesn't call the
 	//connection's Receive(...) function to handle the filled quit channel and
 	//then calls the closeConnection(...) function.
 	select {
-		case <- c.quit: //just here to empty the buffer
-		default:
-			c.quit <- 1
+	case <-c.quit: //just here to empty the buffer
+	default:
+		c.quit <- 1
 	}
-	
+
 	c.isClosed = true
 }

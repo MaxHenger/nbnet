@@ -123,14 +123,13 @@ type Server struct {
 	waitGroupConnections sync.WaitGroup
 }
 
-
 //NewServer(...) will create a new server type to create routines that will
 //listen for certain ip-adresses on specified ports. The arguments to the
 //function call will influence the behaviour of the server and mean the following:
-// 	- deadlineListen: The duration for which the listener routine will listen 
+// 	- deadlineListen: The duration for which the listener routine will listen
 //		to an incomming connection before considering the listening to have timed
 //		out.
-//	- channelListen: The channel size (if it is exceeded go will assume a 
+//	- channelListen: The channel size (if it is exceeded go will assume a
 //		deadlock to have occurred) of the connections that will be returned to
 //		the server type by the listening routine.
 //	- deadlineRead: See documentation for 'NewClient(...)'
@@ -140,7 +139,7 @@ type Server struct {
 //	- bufferCon: See documentation for 'NewClient(...)', argument 'bufferSize'
 //
 //In case a new server is succesfully created the function will not return an
-//error and a non-nill *Server type. 
+//error and a non-nill *Server type.
 func NewServer(deadlineListen time.Duration, channelListen int,
 	deadlineRead, deadlineWrite, sleepDuration time.Duration, channelConn, bufferConn int) (*Server, error) {
 	//ensure input arguments are valid
@@ -263,7 +262,7 @@ func (s *Server) Update() (*Connection, bool, error) {
 
 		newConnection, err := newConnection(conn, s.channelSize, s.bufferSize, s.deadlineRead,
 			s.deadlineWrite, s.sleepDuration, &s.waitGroupConnections)
-			
+
 		if err != nil {
 			//Error occurred while creating the new nbnet connection
 			return nil, false, ErrorEmbedded{ErrorTypeFatal, "Client", "Unable to create a connection instance", err}
@@ -292,13 +291,13 @@ func (s *Server) CloseConnection(c *Connection) error {
 			if !v.isClosed {
 				v.closeConnection()
 			}
-			
+
 			v.connection.Close()
 			s.connections = append(s.connections[0:i], s.connections[i+1:]...)
 			return nil
 		}
 	}
-	
+
 	return Error{ErrorTypeNotFound, "Server", "Failed to close a connection"}
 }
 
@@ -322,12 +321,12 @@ func (s *Server) Close() {
 	//wait for all routines to finish
 	s.waitGroupConnections.Wait()
 	s.waitGroupListeners.Wait()
-	
+
 	//close the net.Conn and wrapListener instances
 	for _, v := range s.connections {
 		v.connection.Close()
 	}
-	
+
 	for _, v := range s.listeners {
 		v.listener.Close()
 	}
